@@ -1,0 +1,12 @@
+{
+  "language": "English",
+  "theme": "Sombre",
+  "auto_save": true,
+  "auto_save_interval": 5,
+  "auto_sync": true,
+  "sync_interval": 60,
+  "auto_backup": true,
+  "backup_retention": 30,
+  "debug_mode": true,
+  "log_level": "DEBUG"
+}

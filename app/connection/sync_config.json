@@ -1,0 +1,11 @@
+{
+  "server_path": "\\\\DESKTOP-BKIB183\\data",
+  "sync_interval": 30,
+  "conflict_resolution": "server_wins",
+  "max_retries": 3,
+  "auto_sync": true,
+  "sync_on_startup": true,
+  "sync_on_shutdown": true,
+  "log_sync_operations": true,
+  "backup_before_sync": true
+}

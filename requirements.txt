@@ -1,0 +1,27 @@
+# Core runtime dependencies for STFOOM packaging
+# Pin versions modestly to ensure reproducible PyInstaller build. Adjust if you already use other versions.
+Pillow==10.4.0
+pandas==2.2.2
+numpy==1.26.4
+python-dateutil==2.9.0.post0
+pytz==2024.1
+six==1.16.0
+# UI date widgets
+tkcalendar==1.6.1
+# Packaging helper (only needed on build machine, optional to keep here)
+pyinstaller==6.6.0
+pyinstaller-hooks-contrib==2024.7
+
+# Additional dependencies discovered in the codebase
+# Authentication
+bcrypt==4.0.1
+# cffi is a common backend used by bcrypt/wheels
+cffi==1.16.0
+# File system watcher used by sync subsystem
+watchdog==3.0.0
+# Excel generation / import
+openpyxl==3.1.2
+# Optional system info utilities used in Settings (nice to include)
+psutil==5.9.5
+# Common HTTP library (may be used by connection code)
+requests==2.31.0

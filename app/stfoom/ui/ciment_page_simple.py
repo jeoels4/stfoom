@@ -1,0 +1,2128 @@
+"""
+Ciment/Matière Première UI Module (Simplified)
+==============================================
+Simplified user interface for cement/raw materials operations.
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from datetime import datetime, date
+from typing import Optional, List
+import sys
+from .shared_widgets import format_money  # Import centralized money formatting
+import os
+
+# Fix import paths for current structure
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from app.stfoom.logic.ciment import (
+    BonLivraison, CimentFacture, create_bon_livraison, get_all_bons_livraison,
+    create_ciment_facture, get_all_ciment_factures, get_bls_en_attente,
+    get_next_bl_numero, get_next_facture_numero, delete_bon_livraison
+)
+from app.stfoom.logic.secure_database import exec_read_all
+from app.stfoom.ui.permission_utils import check_ui_permission, disable_button_if_no_permission
+from tkcalendar import DateEntry
+
+class CimentPage(ttk.Frame):
+    """Simplified ciment management page."""
+    
+    def __init__(self, parent, go_back):
+        super().__init__(parent)
+        self.parent = parent
+        self.go_back = go_back
+        self.current_user_id = getattr(parent, 'current_user_id', None)
+        
+        self.setup_ui()
+        self.load_data()
+    
+    def setup_ui(self):
+        """Setup the user interface."""
+        # Main container
+        main_frame = ttk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Header
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(header_frame, text="Gestion Ciment/Matière Première", 
+                 font=("Arial", 16, "bold")).pack(side=tk.LEFT)
+        
+        ttk.Button(header_frame, text="← Retour", 
+                  command=self.go_back).pack(side=tk.RIGHT)
+        
+        # Notebook for tabs
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Bon de Livraison tab
+        self.setup_bl_tab()
+        
+        # Factures tab
+        self.setup_factures_tab()
+        
+        # Monthly Avoir tab (200T system)
+        self.setup_monthly_avoir_tab()
+        
+        # Statistics tab
+        self.setup_stats_tab()
+    
+    def setup_bl_tab(self):
+        """Setup Bon de Livraison tab."""
+        bl_frame = ttk.Frame(self.notebook)
+        self.notebook.add(bl_frame, text="Bon de Livraison")
+        
+        # Controls frame
+        controls_frame = ttk.Frame(bl_frame)
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Add BL button
+        self.add_bl_btn = ttk.Button(controls_frame, text="+ Nouveau BL", 
+                                    command=self.add_bon_livraison)
+        self.add_bl_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.add_bl_btn, "bon_livraison", "create")
+        
+        # Delete BL button
+        self.delete_bl_btn = ttk.Button(controls_frame, text="❌ Supprimer BL", 
+                                       command=self.delete_bl)
+        self.delete_bl_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.delete_bl_btn, "bon_livraison", "delete")
+        
+        # Separator
+        ttk.Separator(controls_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Set facture number button
+        self.set_facture_btn = ttk.Button(controls_frame, text="📋 Définir N° Facture", 
+                                         command=self.set_facture_numero)
+        self.set_facture_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.set_facture_btn, "bon_livraison", "update")
+        
+        # Set avoir button
+        self.set_avoir_btn = ttk.Button(controls_frame, text="💰 Définir Avoir", 
+                                       command=self.set_avoir_amount)
+        self.set_avoir_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.set_avoir_btn, "bon_livraison", "update")
+        
+        # Separator
+        ttk.Separator(controls_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        # Fournisseur selector (filter BLs by supplier) - only suppliers that exist in BLs, no 'All'
+        supplier_filter_frame = ttk.Frame(controls_frame)
+        supplier_filter_frame.pack(side=tk.LEFT)
+        ttk.Label(supplier_filter_frame, text="Fournisseur BL:").pack(side=tk.LEFT, padx=(0, 6))
+        self.bl_supplier_var = tk.StringVar()
+        self.bl_supplier_combo = ttk.Combobox(supplier_filter_frame, textvariable=self.bl_supplier_var, state="readonly", width=28)
+        self.bl_supplier_combo.pack(side=tk.LEFT)
+        # Map of display -> code for current BL suppliers
+        self._bl_supplier_map = {}
+
+        def _on_bl_supplier_selected(event=None):
+            # Reload BL data with the selected supplier filter
+            self.load_bl_data(refresh_suppliers=False)
+        self.bl_supplier_combo.bind("<<ComboboxSelected>>", _on_bl_supplier_selected)
+
+
+        
+        # BL Treeview - Excel-like columns
+        columns = ("numero", "date", "fournisseur", "quantite", "montant", "facture_numero", "avoir")
+        self.bl_tree = ttk.Treeview(bl_frame, columns=columns, show="headings", height=15)
+        
+        # Configure columns
+        self.bl_tree.heading("numero", text="Numéro")
+        self.bl_tree.heading("date", text="Date Livraison")
+        self.bl_tree.heading("fournisseur", text="Fournisseur")
+        self.bl_tree.heading("quantite", text="Quantité")
+        self.bl_tree.heading("montant", text="Montant")
+        self.bl_tree.heading("facture_numero", text="N° Facture")
+        self.bl_tree.heading("avoir", text="Avoir")
+        
+        self.bl_tree.column("numero", width=100)
+        self.bl_tree.column("date", width=120)
+        self.bl_tree.column("fournisseur", width=150)
+        self.bl_tree.column("quantite", width=100)
+        self.bl_tree.column("montant", width=100)
+        self.bl_tree.column("facture_numero", width=120)
+        self.bl_tree.column("avoir", width=100)
+        
+        # Scrollbar
+        bl_scrollbar = ttk.Scrollbar(bl_frame, orient=tk.VERTICAL, command=self.bl_tree.yview)
+        self.bl_tree.configure(yscrollcommand=bl_scrollbar.set)
+        
+        # Pack tree and scrollbar
+        self.bl_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bl_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind double-click
+        self.bl_tree.bind("<Double-1>", self.edit_bl)
+    
+    def setup_factures_tab(self):
+        """Setup Factures tab."""
+        factures_frame = ttk.Frame(self.notebook)
+        self.notebook.add(factures_frame, text="Factures")
+        
+        # Controls frame
+        controls_frame = ttk.Frame(factures_frame)
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Add facture button
+        self.add_facture_btn = ttk.Button(controls_frame, text="+ Nouvelle Facture", 
+                                         command=self.add_ciment_facture)
+        self.add_facture_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.add_facture_btn, "ciment_factures", "create")
+        
+        # Edit facture button
+        self.edit_facture_btn = ttk.Button(controls_frame, text="✏️ Modifier Facture", 
+                                          command=self.edit_ciment_facture)
+        self.edit_facture_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.edit_facture_btn, "ciment_factures", "update")
+        
+        # Delete facture button
+        self.delete_facture_btn = ttk.Button(controls_frame, text="❌ Supprimer Facture", 
+                                            command=self.delete_ciment_facture)
+        self.delete_facture_btn.pack(side=tk.LEFT, padx=(0, 10))
+        disable_button_if_no_permission(self.delete_facture_btn, "ciment_factures", "delete")
+        
+        # Factures Treeview
+        columns = ("numero", "date", "fournisseur", "montant_total", "statut", "bls")
+        self.factures_tree = ttk.Treeview(factures_frame, columns=columns, show="headings", height=15)
+        
+        # Configure columns
+        self.factures_tree.heading("numero", text="Numéro")
+        self.factures_tree.heading("date", text="Date Facture")
+        self.factures_tree.heading("fournisseur", text="Fournisseur")
+        self.factures_tree.heading("montant_total", text="Montant Total")
+        self.factures_tree.heading("statut", text="Statut")
+        self.factures_tree.heading("bls", text="BLs Inclus")
+        
+        self.factures_tree.column("numero", width=100)
+        self.factures_tree.column("date", width=120)
+        self.factures_tree.column("fournisseur", width=150)
+        self.factures_tree.column("montant_total", width=120)
+        self.factures_tree.column("statut", width=100)
+        self.factures_tree.column("bls", width=100)
+        
+        # Scrollbar
+        factures_scrollbar = ttk.Scrollbar(factures_frame, orient=tk.VERTICAL, command=self.factures_tree.yview)
+        self.factures_tree.configure(yscrollcommand=factures_scrollbar.set)
+        
+        # Pack tree and scrollbar
+        self.factures_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        factures_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind double-click
+        self.factures_tree.bind("<Double-1>", self.edit_ciment_facture)
+    
+    def setup_monthly_avoir_tab(self):
+        """Setup Monthly Avoir (200T) tab with creative design."""
+        monthly_frame = ttk.Frame(self.notebook)
+        self.notebook.add(monthly_frame, text="?? Avoirs 200T/Mois")
+        
+        # Header with gradient-like effect
+        header_frame = ttk.Frame(monthly_frame)
+        header_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        
+        # Title with emoji and styling
+        title_label = ttk.Label(header_frame, 
+                              text="?? Syst�me d'Avoir Mensuel - 200 Tonnes", 
+                              font=("Segoe UI", 16, "bold"))
+        title_label.pack(anchor="w")
+        
+        # Subtitle with explanation
+        subtitle_label = ttk.Label(header_frame, 
+                                 text="Lorsque vos factures mensuelles d�passent 200T, vous �tes �ligible pour un avoir sp�cial!", 
+                                 font=("Segoe UI", 10), 
+                                 foreground="#0066cc")
+        subtitle_label.pack(anchor="w", pady=(5, 0))
+        
+        # Current month status card
+        status_frame = ttk.LabelFrame(monthly_frame, text="?? Statut du Mois Actuel", padding=15)
+        status_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
+        
+        # Status widgets container
+        status_container = ttk.Frame(status_frame)
+        status_container.pack(fill=tk.X)
+        
+        # Left side - current stats
+        left_status = ttk.Frame(status_container)
+        left_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.current_month_label = ttk.Label(left_status, text="?? Mois: Juillet 2025", font=("Segoe UI", 11, "bold"))
+        self.current_month_label.pack(anchor="w")
+        
+        self.current_quantity_label = ttk.Label(left_status, text="?? Quantit�: 0.0T", font=("Segoe UI", 11))
+        self.current_quantity_label.pack(anchor="w", pady=(5, 0))
+        
+        self.threshold_label = ttk.Label(left_status, text="?? Seuil 200T: ? Non atteint", font=("Segoe UI", 11))
+        self.threshold_label.pack(anchor="w", pady=(5, 0))
+        
+        # Right side - avoir info
+        right_status = ttk.Frame(status_container)
+        right_status.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+        
+        self.avoir_rate_label = ttk.Label(right_status, text="?? Taux: 0.000 DT/T", font=("Segoe UI", 11))
+        self.avoir_rate_label.pack(anchor="e")
+        
+        self.current_avoir_label = ttk.Label(right_status, text="?? Avoir �ligible: 0.00 DT", font=("Segoe UI", 11, "bold"))
+        self.current_avoir_label.pack(anchor="e", pady=(5, 0))
+        
+        # Quick info section for recent eligible months
+        info_frame = ttk.LabelFrame(monthly_frame, text="?? Mois �ligibles R�cents", padding=10)
+        info_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
+        
+        self.recent_eligible_label = ttk.Label(info_frame, text="Chargement...", font=("Segoe UI", 10))
+        self.recent_eligible_label.pack(anchor="w")
+        
+        # Historical data section
+        history_frame = ttk.LabelFrame(monthly_frame, text="?? Historique des Mois Pr�c�dents", padding=15)
+        history_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        
+        # Controls for history
+        history_controls = ttk.Frame(history_frame)
+        history_controls.pack(fill=tk.X, pady=(0, 10))
+        
+        # Month selector for viewing specific months
+        month_selector_frame = ttk.Frame(history_controls)
+        month_selector_frame.pack(side=tk.LEFT, padx=(0, 20))
+        
+        ttk.Label(month_selector_frame, text="?? Mois:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Month/year selector
+        from datetime import datetime
+        current_date = datetime.now()
+        self.month_var = tk.StringVar(value=current_date.strftime("%Y-%m"))
+        
+        # Create month options (current month + 12 previous months)
+        month_options = []
+        for i in range(13):
+            date_obj = datetime(current_date.year, current_date.month, 1)
+            if i > 0:
+                # Go back i months
+                if date_obj.month - i <= 0:
+                    new_month = 12 + (date_obj.month - i)
+                    new_year = date_obj.year - 1
+                else:
+                    new_month = date_obj.month - i
+                    new_year = date_obj.year
+                date_obj = datetime(new_year, new_month, 1)
+            month_options.append(date_obj.strftime("%Y-%m"))
+        
+        self.month_selector = ttk.Combobox(month_selector_frame, textvariable=self.month_var, 
+                                         values=month_options, width=10, state="readonly")
+        self.month_selector.pack(side=tk.LEFT, padx=(0, 5))
+        self.month_selector.bind("<<ComboboxSelected>>", self.on_month_selected)
+        
+        ttk.Button(month_selector_frame, text="?? Voir", command=self.view_selected_month).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Other controls
+        controls_right = ttk.Frame(history_controls)
+        controls_right.pack(side=tk.RIGHT)
+        
+        ttk.Button(controls_right, text="?? Voir D�tails", command=self.show_monthly_details).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(controls_right, text="?? Test Syst�me Unifi�", command=self.test_unified_notification).pack(side=tk.LEFT)
+        
+        # History treeview
+        history_columns = ("month", "quantity", "threshold", "avoir", "status")
+        self.monthly_tree = ttk.Treeview(history_frame, columns=history_columns, show="headings", height=8)
+        
+        # Configure columns
+        self.monthly_tree.heading("month", text="?? Mois")
+        self.monthly_tree.heading("quantity", text="?? Quantit� (T)")
+        self.monthly_tree.heading("threshold", text="?? Seuil 200T")
+        self.monthly_tree.heading("avoir", text="?? Avoir (DT)")
+        self.monthly_tree.heading("status", text="?? Statut")
+        
+        self.monthly_tree.column("month", width=120, anchor="center")
+        self.monthly_tree.column("quantity", width=120, anchor="center")
+        self.monthly_tree.column("threshold", width=120, anchor="center")
+        self.monthly_tree.column("avoir", width=120, anchor="center")
+        self.monthly_tree.column("status", width=150, anchor="center")
+        
+        # Scrollbar for history
+        monthly_scrollbar = ttk.Scrollbar(history_frame, orient=tk.VERTICAL, command=self.monthly_tree.yview)
+        self.monthly_tree.configure(yscrollcommand=monthly_scrollbar.set)
+        
+        self.monthly_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        monthly_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Load initial data
+        self.refresh_monthly_status()
+        self.load_monthly_history()
+    
+    def setup_stats_tab(self):
+        """Setup Statistics tab."""
+        stats_frame = ttk.Frame(self.notebook)
+        self.notebook.add(stats_frame, text="Statistiques")
+        
+        # Statistics display
+        self.stats_text = tk.Text(stats_frame, height=20, width=60)
+        self.stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    def load_data(self):
+        """Load all data."""
+        # Populate filter first, then load BLs
+        self.load_bl_data(refresh_suppliers=True)
+        self.load_factures_data()
+        self.load_stats()
+    
+    def load_bl_data(self, refresh_suppliers: bool = False):
+        """Load Bon de Livraison data with clean Excel-like table display.
+        If refresh_suppliers is True, repopulate the supplier selector from BL data.
+        """
+        # Clear existing items
+        for item in self.bl_tree.get_children():
+            self.bl_tree.delete(item)
+        
+        # Get BLs with facture information (already sorted by date DESC)
+        from app.stfoom.logic.ciment import get_bls_with_facture_info
+        from app.stfoom.logic.avoir_manager import AvoirManager
+        bls_data = get_bls_with_facture_info()
+
+        # Optionally refresh supplier filter based on available BLs suppliers
+        if refresh_suppliers:
+            self._populate_bl_supplier_filter(bls_data)
+
+        # Filter by selected supplier (no 'All' option; if none selected, default to first available)
+        selected_code = self._get_selected_bl_supplier_code()
+        if selected_code:
+            def _code_of(bl):
+                return bl.get('fournisseur_id') if bl.get('fournisseur_id') is not None else bl.get('code_fournisseur')
+            bls_data = [bl for bl in bls_data if (str(_code_of(bl)) == str(selected_code))]
+        
+        # Initialize avoir manager
+        avoir_manager = AvoirManager()
+        
+        # Group BLs by facture number for clean table display
+        facture_groups = {}
+        ungrouped_bls = []
+        
+        for bl_data in bls_data:
+            facture_num = bl_data.get('numero_facture')
+            if facture_num:
+                if facture_num not in facture_groups:
+                    facture_groups[facture_num] = []
+                facture_groups[facture_num].append(bl_data)
+            else:
+                ungrouped_bls.append(bl_data)
+        
+        # Configure clean table styling
+        self._configure_excel_table_style()
+        
+        # Insert facture groups with Excel-like merged cell appearance
+        for facture_num, bls in facture_groups.items():
+            # Insert header row for each facture (like Excel merged cells)
+            self._insert_facture_header_row(facture_num, bls)
+            
+            # Insert BL rows with facture number shown for ALL rows
+            for i, bl_data in enumerate(bls):
+                # Show facture number for ALL BLs in the group (not merged)
+                facture_display = facture_num
+                
+                # Calculate avoir for this BL
+                avoir_amount = 0
+                try:
+                    bl_id = bl_data['id']
+                    quantite = bl_data['quantite']
+                    avoir_result = avoir_manager.calculate_bl_avoir_total(bl_id, quantite)
+                    avoir_amount = avoir_result.get('total', 0) if avoir_result else 0
+                    avoir_display = format_money(avoir_amount) if avoir_amount > 0 else ""
+                except Exception as e:
+                    print(f"[AVOIR] Error calculating avoir for BL {bl_data.get('id', 'unknown')}: {e}")
+                    avoir_display = ""
+                    avoir_amount = 0
+                
+                # Determine status color tag based on facture and avoir status
+                # RED: En attente (no facture number) 
+                # YELLOW: Facturé (has facture number but no avoir)
+                # GREEN: Facturé + Avoir réalisé (has facture and avoir > 0)
+                
+                print(f"[COLOR_DEBUG] BL {bl_data['numero']}: facture='{facture_display}', avoir={avoir_amount}")
+                
+                if not facture_num or facture_display in ["En attente", "-- Non Facturé --", ""]:
+                    status_tag = "en_attente"  # RED
+                    print(f"[COLOR_DEBUG] -> RED (en_attente)")
+                elif avoir_amount > 0:
+                    status_tag = "facture_avec_avoir"  # GREEN - has facture + avoir
+                    print(f"[COLOR_DEBUG] -> GREEN (facture_avec_avoir)")
+                else:
+                    status_tag = "facture"  # YELLOW - has facture but no avoir
+                    print(f"[COLOR_DEBUG] -> YELLOW (facture)")
+                
+                supplier_name = bl_data.get('fournisseur_nom')
+                supplier_code = bl_data.get('fournisseur_id') if bl_data.get('fournisseur_id') is not None else bl_data.get('code_fournisseur')
+                supplier_cell = supplier_name or (f"ID: {supplier_code}" if supplier_code is not None else "")
+                self.bl_tree.insert("", tk.END, values=(
+                    bl_data['numero'],
+                    bl_data['date_livraison'].strftime("%d/%m/%Y"),
+                    supplier_cell,
+                    f"{bl_data['quantite']} {bl_data['unite']}",
+                    format_money(bl_data['montant']),
+                    facture_display,
+                    avoir_display
+                ), tags=(str(bl_data['id']), status_tag))
+        
+        # Insert ungrouped BLs at the end
+        if ungrouped_bls:
+            self._insert_facture_header_row("-- Non Factur� --", ungrouped_bls)
+            for bl_data in ungrouped_bls:
+                # Calculate avoir for ungrouped BL
+                avoir_amount = 0
+                try:
+                    bl_id = bl_data['id']
+                    quantite = bl_data['quantite']
+                    avoir_result = avoir_manager.calculate_bl_avoir_total(bl_id, quantite)
+                    avoir_amount = avoir_result.get('total', 0) if avoir_result else 0
+                    avoir_display = format_money(avoir_amount) if avoir_amount > 0 else ""
+                except Exception as e:
+                    print(f"[AVOIR] Error calculating avoir for ungrouped BL {bl_data.get('id', 'unknown')}: {e}")
+                    avoir_display = ""
+                    avoir_amount = 0
+                
+                # Ungrouped BLs: if they have an avoir alone, mark as YELLOW; otherwise RED
+                if avoir_amount > 0:
+                    status_tag = "facture"  # YELLOW for avoir-only scenario
+                    print(f"[COLOR_DEBUG] Ungrouped BL {bl_data['numero']}: AV OIR ONLY -> YELLOW (facture)")
+                else:
+                    status_tag = "en_attente"  # RED
+                    print(f"[COLOR_DEBUG] Ungrouped BL {bl_data['numero']}: -> RED (en_attente)")
+                
+                supplier_name = bl_data.get('fournisseur_nom')
+                supplier_code = bl_data.get('fournisseur_id') if bl_data.get('fournisseur_id') is not None else bl_data.get('code_fournisseur')
+                supplier_cell = supplier_name or (f"ID: {supplier_code}" if supplier_code is not None else "")
+                self.bl_tree.insert("", tk.END, values=(
+                    bl_data['numero'],
+                    bl_data['date_livraison'].strftime("%d/%m/%Y"),
+                    supplier_cell,
+                    f"{bl_data['quantite']} {bl_data['unite']}",
+                    format_money(bl_data['montant']),
+                    "En attente",
+                    avoir_display
+                ), tags=(str(bl_data['id']), status_tag))
+
+    def _populate_bl_supplier_filter(self, bls_data: list):
+        """Populate the BL supplier selector with distinct suppliers present in BLs.
+        No 'All' option; default-select the first supplier if current selection is absent.
+        """
+        try:
+            # Build distinct suppliers from BLs, supporting both 'fournisseur_id' and 'code_fournisseur'
+            suppliers = []  # list of tuples (code, display)
+            seen = set()
+            for bl in bls_data:
+                code = bl.get('fournisseur_id') if bl.get('fournisseur_id') is not None else bl.get('code_fournisseur')
+                name = bl.get('fournisseur_nom')
+                if code is None:
+                    continue
+                key = str(code)
+                if key in seen:
+                    continue
+                seen.add(key)
+                display = f"{name} ({code})" if name else f"ID: {code}"
+                suppliers.append((key, display))
+
+            # Sort by display name for consistency
+            suppliers.sort(key=lambda x: x[1])
+
+            # Preserve previous selection if still present
+            prev_code = self._get_selected_bl_supplier_code()
+
+            # Update combobox values and internal map
+            self._bl_supplier_map = {disp: code for code, disp in suppliers}
+            values = [disp for _, disp in suppliers]
+            self.bl_supplier_combo['values'] = values
+
+            # Decide selection: keep previous if valid; else first item if available
+            to_select_display = None
+            if prev_code and any(code == str(prev_code) for code, _ in suppliers):
+                # Find display for prev_code
+                for code, disp in suppliers:
+                    if code == str(prev_code):
+                        to_select_display = disp
+                        break
+            elif suppliers:
+                to_select_display = suppliers[0][1]
+
+            if not suppliers:
+                # Fallback: avoid heavy JOINs; get distinct codes then lookup names per code
+                try:
+                    from app.stfoom.logic.secure_database import exec_read_all, exec_read_one
+                    codes = exec_read_all(
+                        """
+                        SELECT DISTINCT code_fournisseur
+                        FROM bon_livraison
+                        WHERE code_fournisseur IS NOT NULL AND TRIM(code_fournisseur) <> ''
+                        ORDER BY code_fournisseur
+                        """
+                    )
+                    suppliers = []
+                    for (code,) in codes:
+                        if code is None:
+                            continue
+                        name_row = exec_read_one("SELECT nom_fournisseur FROM fournisseurs WHERE code_fournisseur=?", (code,))
+                        nom = name_row[0] if name_row else ''
+                        display = f"{nom} ({code})" if nom else f"ID: {code}"
+                        suppliers.append((str(code), display))
+
+                    self._bl_supplier_map = {disp: code for code, disp in suppliers}
+                    values = [disp for _, disp in suppliers]
+                    self.bl_supplier_combo['values'] = values
+
+                    if suppliers:
+                        self.bl_supplier_combo.set(suppliers[0][1])
+                    else:
+                        self.bl_supplier_combo.set("")
+                except Exception as e:
+                    print(f"[BL_SUPPLIER_FILTER] Fallback supplier load failed: {e}")
+                    self.bl_supplier_combo.set("")
+            else:
+                if to_select_display:
+                    self.bl_supplier_combo.set(to_select_display)
+                else:
+                    # Clear selection if no suppliers
+                    self.bl_supplier_combo.set("")
+        except Exception as e:
+            print(f"[BL_SUPPLIER_FILTER] Error populating supplier filter: {e}")
+
+    def _get_selected_bl_supplier_code(self) -> Optional[str]:
+        """Return the selected supplier code from the BL supplier combobox."""
+        try:
+            display = self.bl_supplier_var.get().strip()
+            if not display:
+                return None
+            # Map back to code via internal map; fallback by parsing '(CODE)'
+            if hasattr(self, '_bl_supplier_map') and display in self._bl_supplier_map:
+                return self._bl_supplier_map[display]
+            # Fallback parse
+            if '(' in display and display.endswith(')'):
+                return display.split('(')[-1].rstrip(')')
+            return None
+        except Exception:
+            return None
+
+    def _configure_excel_table_style(self):
+        """Configure Excel-like table styling with status color coding similar to vente page."""
+        # Header row style (like Excel merged header cells)
+        self.bl_tree.tag_configure("facture_header", 
+                                 background="#4472C4",     # Excel blue header
+                                 foreground="white",
+                                 font=("Segoe UI", 10, "bold"))
+        
+        # Status color coding (similar to vente page)
+        # RED: En attente (no facture number)
+        self.bl_tree.tag_configure("en_attente", 
+                                 foreground="#721c24",      # Dark red text
+                                 background="#f8d7da",      # Light red background
+                                 font=("Segoe UI", 9))
+        
+        # YELLOW: Facturé (has facture number but no avoir realized)
+        self.bl_tree.tag_configure("facture", 
+                                 foreground="#b8860b",      # Dark yellow text
+                                 background="#fff3cd",      # Light yellow background
+                                 font=("Segoe UI", 9))
+        
+        # GREEN: Facturé + Avoir réalisé (has facture and avoir > 0)
+        self.bl_tree.tag_configure("facture_avec_avoir", 
+                                 foreground="#155724",      # Dark green text
+                                 background="#d4edda",      # Light green background
+                                 font=("Segoe UI", 9))
+        
+        # Legacy styles (keep for compatibility)
+        self.bl_tree.tag_configure("facture_first", 
+                                 background="#ffffff",     # Clean white background
+                                 foreground="#212529",    # Dark text
+                                 font=("Segoe UI", 9))
+        
+        self.bl_tree.tag_configure("facture_continuation", 
+                                 background="#ffffff",     # Clean white background
+                                 foreground="#212529",    # Dark text
+                                 font=("Segoe UI", 9))
+        
+        self.bl_tree.tag_configure("ungrouped", 
+                                 background="#FFF2CC",     # Light yellow like Excel pending
+                                 foreground="#7F6000",
+                                 font=("Segoe UI", 9))
+        
+        # Separator lines
+        self.bl_tree.tag_configure("separator", 
+                                 background="#BFBFBF",     # Gray separator
+                                 foreground="#404040")
+
+    def _insert_facture_header_row(self, facture_num, bls_data):
+        """Insert a clean header row for facture group with total quantity and total avoir (Excel-style merged header)."""
+        if isinstance(bls_data, int):
+            # Handle old call format (just count)
+            bl_count = bls_data
+            total_qty = ""
+            total_avoir = ""
+        elif isinstance(bls_data, list):
+            # New format with actual BL data
+            bl_count = len(bls_data)
+            # Calculate total quantity for this facture group
+            total_qty = sum(float(bl.get('quantite', 0)) for bl in bls_data)
+            total_qty = f"{total_qty:.1f}T" if total_qty > 0 else ""
+            
+            # Calculate total avoir for this facture group
+            from stfoom.logic.avoir_manager import avoir_manager
+            total_avoir_amount = 0.0
+            try:
+                for bl in bls_data:
+                    bl_id = bl.get('id')
+                    quantite = bl.get('quantite', 0)
+                    if bl_id and quantite > 0:
+                        avoir_result = avoir_manager.calculate_bl_avoir_total(bl_id, quantite)
+                        total_avoir_amount += avoir_result.get('total', 0)
+                
+                total_avoir = f"?? {total_avoir_amount:.3f} DT" if total_avoir_amount > 0 else ""
+            except Exception as e:
+                print(f"[AVOIR] Error calculating total avoir for facture {facture_num}: {e}")
+                total_avoir = ""
+        else:
+            bl_count = 0
+            total_qty = ""
+            total_avoir = ""
+        
+        header_text = f"?? FACTURE {facture_num}"
+        bl_text = f"({bl_count} BL{'s' if bl_count > 1 else ''})"
+        
+        # Insert header row spanning across columns with total quantity and avoir
+        self.bl_tree.insert("", tk.END, values=(
+            "���", header_text, bl_text, total_qty, "", total_avoir, ""
+        ), tags=("facture_header",))
+
+    def load_factures_data(self):
+        """Load Factures data."""
+        # Clear existing items
+        for item in self.factures_tree.get_children():
+            self.factures_tree.delete(item)
+        
+        # Get factures
+        factures = get_all_ciment_factures()
+        
+        # Add to treeview
+        for facture in factures:
+            statut_display = {
+                "en_attente": "En Attente",
+                "payee": "Payée",
+                "annulee": "Annulée"
+            }.get(facture.statut, facture.statut)
+            
+            # Count BLs
+            bl_count = len(facture.bls_inclus) if facture.bls_inclus else 0
+            
+            self.factures_tree.insert("", tk.END, values=(
+                facture.numero_facture,
+                facture.date_facture.strftime("%d/%m/%Y"),
+                facture.fournisseur_nom or f"ID: {facture.fournisseur_id}",
+                format_money(facture.montant_total),
+                statut_display,
+                f"{bl_count} BL(s)"
+            ), tags=(str(facture.id),))
+    
+    def load_stats(self):
+        """Load and display statistics."""
+        from app.stfoom.logic.ciment import get_ciment_statistics
+        
+        stats = get_ciment_statistics()
+        
+        stats_text = "📊 Statistiques Ciment/Matière Première\n"
+        stats_text += "=" * 50 + "\n\n"
+        
+        stats_text += f"📋 Bon de Livraison:\n"
+        stats_text += f"  - Total: {stats.get('total_bls', 0)}\n"
+        stats_text += f"  - Quantité totale: {stats.get('total_quantite', 0):.3f} tonnes\n"
+        stats_text += f"  - Montant total: {stats.get('total_montant_bls', 0):.3f} DT\n"
+        stats_text += f"  - Moyenne par BL: {stats.get('moyenne_montant_bl', 0):.3f} DT\n\n"
+        
+        stats_text += f"📄 Factures:\n"
+        stats_text += f"  - Total: {stats.get('total_factures', 0)}\n"
+        stats_text += f"  - Montant total: {stats.get('total_montant_factures', 0):.3f} DT\n"
+        stats_text += f"  - Moyenne par facture: {stats.get('moyenne_montant_facture', 0):.3f} DT\n\n"
+        
+        self.stats_text.delete(1.0, tk.END)
+        self.stats_text.insert(1.0, stats_text)
+    
+    def add_bon_livraison(self):
+        """Add new Bon de Livraison."""
+        if not check_ui_permission("bon_livraison", "create"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de créer un BL")
+            return
+        
+        dialog = BonLivraisonDialog(self, "Nouveau Bon de Livraison")
+        if dialog.result:
+            self.load_bl_data()
+    
+    def delete_bl(self):
+        """Delete selected BL."""
+        if not check_ui_permission("bon_livraison", "delete"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de supprimer un BL")
+            return
+        
+        selection = self.bl_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner un BL à supprimer")
+            return
+        
+        bl_id = int(self.bl_tree.item(selection[0], "tags")[0])
+        bl_numero = self.bl_tree.item(selection[0], "values")[0]
+        
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Confirmer suppression", 
+            f"Êtes-vous sûr de vouloir supprimer le BL '{bl_numero}' ?\n\nCette action est irréversible."
+        )
+        
+        if result:
+            success, message = delete_bon_livraison(bl_id)
+            if success:
+                messagebox.showinfo("Succès", message)
+                self.load_bl_data()
+                self.refresh_monthly_status()
+                self.load_monthly_history()
+            else:
+                messagebox.showerror("Erreur", message)
+    
+    def edit_bl(self, event=None):
+        """Edit selected BL."""
+        selection = self.bl_tree.selection()
+        if not selection:
+            return
+        
+        bl_id = self.bl_tree.item(selection[0], "tags")[0]
+        messagebox.showinfo("Info", "Fonction d'édition à implémenter")
+    
+    def set_facture_numero(self):
+        """Set facture number for selected BLs."""
+        if not check_ui_permission("bon_livraison", "update"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de modifier un BL")
+            return
+        
+        selections = self.bl_tree.selection()
+        if not selections:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner un ou plusieurs BLs")
+            return
+        
+        # Get facture number from user
+        dialog = FactureNumeroDialog(self, "Définir Numéro de Facture")
+        if not dialog.result:
+            return
+        
+        facture_numero = dialog.result['numero_facture']
+        bl_ids = [int(self.bl_tree.item(item, "tags")[0]) for item in selections]
+        
+        # Create or link to facture
+        from stfoom.logic.ciment import create_facture_for_bls
+        success, message = create_facture_for_bls(facture_numero, bl_ids)
+        
+        if success:
+            messagebox.showinfo("Succès", message)
+            self.load_bl_data()
+            self.load_factures_data()
+            self.refresh_monthly_status()
+            self.load_monthly_history()
+        else:
+            messagebox.showerror("Erreur", message)
+    
+    def set_avoir_amount(self):
+        """Set avoir amount for selected BL."""
+        if not check_ui_permission("bon_livraison", "update"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de modifier un BL")
+            return
+        
+        selection = self.bl_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner un BL")
+            return
+        
+        if len(selection) > 1:
+            messagebox.showwarning("Sélection multiple", "Veuillez sélectionner un seul BL pour l'avoir")
+            return
+        
+        bl_id = int(self.bl_tree.item(selection[0], "tags")[0])
+        bl_numero = self.bl_tree.item(selection[0], "values")[0]
+        
+        # Get avoir amount from user
+        dialog = AvoirAmountDialog(self, f"Définir Avoir pour BL {bl_numero}")
+        if not dialog.result:
+            return
+        
+        avoir_amount = dialog.result['avoir_amount']
+        
+        # TODO: Implement avoir functionality when avoir table is created
+        messagebox.showinfo("Info", f"Fonctionnalité avoir en cours de développement.\nMontant saisi: {avoir_amount:.3f} DT")
+        
+        # For now, just refresh to show the change would work
+        # self.load_bl_data()
+    
+    def add_ciment_facture(self):
+        """Add new Ciment Facture."""
+        if not check_ui_permission("ciment_factures", "create"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de créer une facture")
+            return
+        
+        dialog = CimentFactureDialog(self, "Nouvelle Facture Ciment")
+        if dialog.result:
+            self.load_factures_data()
+    
+    def edit_ciment_facture(self, event=None):
+        """Edit selected facture."""
+        selection = self.factures_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner une facture à modifier")
+            return
+        
+        facture_id = int(self.factures_tree.item(selection[0], "tags")[0])
+        dialog = CimentFactureDialog(self, "Modifier Facture Ciment", facture_id)
+        if dialog.result:
+            self.load_factures_data()
+    
+    def delete_ciment_facture(self):
+        """Delete selected facture."""
+        if not check_ui_permission("ciment_factures", "delete"):
+            messagebox.showerror("Permission refusée", "Vous n'avez pas la permission de supprimer une facture")
+            return
+        
+        selection = self.factures_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner une facture à supprimer")
+            return
+        
+        facture_id = int(self.factures_tree.item(selection[0], "tags")[0])
+        facture_numero = self.factures_tree.item(selection[0], "values")[0]
+        
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Confirmer suppression", 
+            f"Êtes-vous sûr de vouloir supprimer la facture '{facture_numero}' ?\n\nCette action est irréversible."
+        )
+        
+        if result:
+            from stfoom.logic.ciment import delete_ciment_facture
+            success, message = delete_ciment_facture(facture_id)
+            if success:
+                messagebox.showinfo("Succ�s", message)
+                self.load_factures_data()
+                self.load_bl_data()
+                self.refresh_monthly_status() 
+                self.load_monthly_history()
+            else:
+                messagebox.showerror("Erreur", message)
+    
+    # ======================== Monthly Avoir Methods ========================
+    
+    def refresh_monthly_status(self):
+        """Refresh current month status display."""
+        try:
+            from stfoom.logic.monthly_avoir_manager import MonthlyAvoirManager
+            from stfoom.logic.avoir_manager import avoir_manager
+            
+            # Create monthly avoir manager instance
+            monthly_manager = MonthlyAvoirManager()
+            
+            # Get current month summary
+            current_month = monthly_manager.get_current_month_key()
+            summary = monthly_manager.get_monthly_summary(current_month)
+            
+            # Update labels with current month
+            month_text = f"?? Mois Actuel: {current_month}"
+            
+            # If current month has no data, show most recent month with data
+            if summary['total_quantity'] == 0:
+                try:
+                    history = monthly_manager.get_all_months_summary()
+                    if history:
+                        # Find most recent month with data
+                        recent_month = max(history, key=lambda x: x['month'])
+                        if recent_month['total_quantity'] > 0:
+                            month_text += f" (Dernier avec donn�es: {recent_month['month']})"
+                except Exception:
+                    pass
+            
+            self.current_month_label.config(text=month_text)
+            self.current_quantity_label.config(text=f"?? Quantit�: {summary['total_quantity']:.1f}T")
+            
+            # Threshold status with color
+            if summary['threshold_met']:
+                threshold_text = "?? Seuil 200T: ? ATTEINT!"
+                threshold_color = "#008000"  # Green
+            else:
+                remaining = 200.0 - summary['total_quantity']
+                threshold_text = f"?? Seuil 200T: ? Manque {remaining:.1f}T"
+                threshold_color = "#ff6600"  # Orange
+            
+            self.threshold_label.config(text=threshold_text, foreground=threshold_color)
+            
+            # Get current rate
+            config = avoir_manager.get_avoir_config()
+            rate = config.get('total_factures_200t_month', {}).get('rate', 0.0)
+            self.avoir_rate_label.config(text=f"?? Taux: {rate:.3f} DT/T")
+            
+            # Avoir amount with emphasis if eligible
+            if summary['threshold_met'] and summary['total_avoir'] > 0:
+                avoir_text = f"?? Avoir �ligible: {summary['total_avoir']:.3f} DT"
+                avoir_color = "#008000"  # Green
+                avoir_font = ("Segoe UI", 11, "bold")
+            else:
+                avoir_text = "?? Avoir �ligible: Non �ligible"
+                avoir_color = "#666666"  # Gray
+                avoir_font = ("Segoe UI", 11)
+            
+            self.current_avoir_label.config(text=avoir_text, foreground=avoir_color, font=avoir_font)
+            
+            # Update recent eligible months info
+            try:
+                history = monthly_manager.get_all_months_summary()
+                eligible_months = [m for m in history if m['threshold_met'] and m['total_avoir'] > 0]
+                
+                if eligible_months:
+                    # Sort by month (most recent first)
+                    eligible_months.sort(key=lambda x: x['month'], reverse=True)
+                    recent_info = []
+                    
+                    for month_data in eligible_months[:3]:  # Show up to 3 recent eligible months
+                        month = month_data['month']
+                        avoir = month_data['total_avoir']
+                        quantity = month_data['total_quantity']
+                        recent_info.append(f"?? {month}: {quantity:.0f}T ? {avoir:.0f} DT")
+                    
+                    info_text = " | ".join(recent_info)
+                    if len(eligible_months) > 3:
+                        info_text += f" (+{len(eligible_months) - 3} autres...)"
+                else:
+                    info_text = "Aucun mois �ligible trouv�"
+                
+                if hasattr(self, 'recent_eligible_label'):
+                    self.recent_eligible_label.config(text=info_text)
+            except Exception as e:
+                if hasattr(self, 'recent_eligible_label'):
+                    self.recent_eligible_label.config(text="Erreur de chargement")
+                print(f"[MONTHLY_AVOIR] Error updating recent eligible: {e}")
+            
+        except Exception as e:
+            print(f"[MONTHLY_AVOIR] Error refreshing status: {e}")
+            # Show error in labels
+            self.current_month_label.config(text="?? Mois: Erreur")
+            self.current_quantity_label.config(text="?? Quantit�: Erreur")
+            self.threshold_label.config(text="?? Seuil 200T: Erreur")
+            self.current_avoir_label.config(text="?? Avoir: Erreur")
+    
+    def load_monthly_history(self):
+        """Load monthly avoir history."""
+        try:
+            from stfoom.logic.monthly_avoir_manager import MonthlyAvoirManager
+            
+            # Create monthly avoir manager instance
+            monthly_manager = MonthlyAvoirManager()
+            
+            # Clear existing items
+            for item in self.monthly_tree.get_children():
+                self.monthly_tree.delete(item)
+            
+            # Get history
+            history = monthly_manager.get_all_months_summary()
+            
+            for month_data in history:
+                month = month_data['month']
+                quantity = f"{month_data['total_quantity']:.1f}T"
+                
+                # Threshold with emoji
+                if month_data['threshold_met']:
+                    threshold = "? Atteint"
+                    threshold_color = "#008000"
+                else:
+                    threshold = "? Non atteint"
+                    threshold_color = "#ff6600"
+                
+                # Avoir amount
+                avoir = format_money(month_data['total_avoir']) if month_data['threshold_met'] else "0.00 DT"
+                
+                # Status with emojis
+                if not month_data['threshold_met']:
+                    status = "?? < 200T"
+                elif month_data['is_processed']:
+                    status = "? Trait�"
+                elif month_data['notification_sent']:
+                    status = "?? Notifi�"
+                else:
+                    status = "?? Nouveau!"
+                
+                # Insert with tags for styling
+                item_tag = "eligible" if month_data['threshold_met'] else "not_eligible"
+                item_id = self.monthly_tree.insert("", tk.END, values=(
+                    month, quantity, threshold, avoir, status
+                ), tags=(item_tag,))
+                
+                # Apply colors based on threshold
+                if month_data['threshold_met']:
+                    self.monthly_tree.set(item_id, "threshold", threshold)
+            
+            # Configure tags for visual appeal
+            self.monthly_tree.tag_configure("eligible", background="#e8f5e8")  # Light green
+            self.monthly_tree.tag_configure("not_eligible", background="#fff5e6")  # Light orange
+            
+        except Exception as e:
+            print(f"[MONTHLY_AVOIR] Error loading history: {e}")
+    
+    def show_monthly_details(self):
+        """Show detailed monthly avoir management window."""
+        try:
+            from stfoom.ui.monthly_avoir_page import MonthlyAvoirPage
+            
+            # Create popup window
+            details_window = tk.Toplevel(self)
+            details_window.title("?? D�tails des Avoirs Mensuels")
+            details_window.geometry("900x600")
+            details_window.transient(self)
+            
+            # Center the window
+            details_window.update_idletasks()
+            x = (self.winfo_rootx() + (self.winfo_width() // 2)) - (details_window.winfo_width() // 2)
+            y = (self.winfo_rooty() + (self.winfo_height() // 2)) - (details_window.winfo_height() // 2)
+            details_window.geometry(f"+{x}+{y}")
+            
+            # Create the monthly avoir page
+            monthly_page = MonthlyAvoirPage(details_window, lambda: details_window.destroy())
+            monthly_page.pack(fill="both", expand=True)
+            
+        except Exception as e:
+            print(f"[MONTHLY_AVOIR] Error showing details: {e}")
+            messagebox.showerror("Erreur", f"Erreur lors de l'ouverture des d�tails: {e}")
+    
+    def test_unified_notification(self):
+        """Test the unified notification system with a manual notification."""
+        try:
+            from stfoom.ui.notification_system import notification_manager
+            
+            # Add a test notification
+            notification_manager.add_notification(
+                title="?? Test Notification",
+                message="Ceci est un test du syst�me de notifications unifi�. Le syst�me fonctionne correctement!",
+                type_="info"
+            )
+            
+            messagebox.showinfo("?? Test", "Notification test ajout�e!\nRegardez le bouton ?? dans le footer.")
+            
+        except Exception as e:
+            print(f"[NOTIFICATION_TEST] Error: {e}")
+            messagebox.showerror("? Erreur", f"Erreur lors du test de notification: {e}")
+    
+    def check_monthly_notifications(self):
+        """Check for pending monthly avoir notifications."""
+        try:
+            from stfoom.ui.notification_system import notification_manager
+            
+            # Force a check for monthly avoir notifications
+            notification_manager._check_monthly_avoir()
+            
+            messagebox.showinfo("?? V�rification", "V�rification effectu�e!\nLes notifications appara�tront dans le bouton ?? du footer.")
+            
+            # Refresh the display
+            self.refresh_monthly_status()
+            self.load_monthly_history()
+            
+        except Exception as e:
+            print(f"[MONTHLY_AVOIR] Error checking notifications: {e}")
+            messagebox.showerror("Erreur", f"Erreur lors de la v�rification: {e}")
+
+    def on_month_selected(self, event=None):
+        """Handle month selection change."""
+        selected_month = self.month_var.get()
+        print(f"[MONTHLY_AVOIR] Month selected: {selected_month}")
+
+    def view_selected_month(self):
+        """View details for the selected month."""
+        try:
+            selected_month = self.month_var.get()
+            
+            from stfoom.logic.monthly_avoir_manager import MonthlyAvoirManager
+            monthly_manager = MonthlyAvoirManager()
+            
+            # Get summary for selected month
+            month_summary = monthly_manager.get_monthly_summary(selected_month)
+            
+            if month_summary['total_quantity'] == 0:
+                messagebox.showinfo("?? Mois S�lectionn�", 
+                                  f"Aucune donn�e trouv�e pour {selected_month}")
+                return
+            
+            # Create detailed view window
+            self._show_month_details_window(selected_month, month_summary)
+            
+        except Exception as e:
+            print(f"[MONTHLY_AVOIR] Error viewing selected month: {e}")
+            messagebox.showerror("Erreur", f"Erreur lors de l'affichage: {e}")
+
+    def _show_month_details_window(self, month, summary):
+        """Show detailed month information in a new window."""
+        details_window = tk.Toplevel(self)
+        details_window.title(f"?? D�tails {month}")
+        details_window.geometry("600x500")
+        details_window.transient(self)
+        details_window.grab_set()
+        
+        # Header
+        header_frame = ttk.Frame(details_window)
+        header_frame.pack(fill=tk.X, padx=20, pady=(20, 10))
+        
+        ttk.Label(header_frame, text=f"?? D�tails pour {month}", 
+                 font=("Segoe UI", 16, "bold")).pack()
+        
+        # Summary info
+        summary_frame = ttk.LabelFrame(details_window, text="?? R�sum�", padding=15)
+        summary_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        
+        info_text = f"""?? Quantit� totale: {summary['total_quantity']:.3f} tonnes
+?? Seuil 200T: {'? Atteint' if summary['threshold_met'] else '? Non atteint'}
+?? Taux avoir: {summary['avoir_rate']:.3f} DT/tonne
+?? Avoir �ligible: {summary['total_avoir']:.3f} DT
+?? Notification envoy�e: {'? Oui' if summary['notification_sent'] else '? Non'}
+?? Trait�: {'? Oui' if summary['is_processed'] else '? Non'}"""
+        
+        ttk.Label(summary_frame, text=info_text, font=("Segoe UI", 11)).pack(anchor="w")
+        
+        # Factures list
+        if summary['factures']:
+            factures_frame = ttk.LabelFrame(details_window, text="?? Factures Contributives", padding=15)
+            factures_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+            
+            # Create treeview for factures
+            columns = ("numero", "date", "quantity")
+            factures_tree = ttk.Treeview(factures_frame, columns=columns, show="headings", height=10)
+            
+            factures_tree.heading("numero", text="?? Num�ro")
+            factures_tree.heading("date", text="?? Date")
+            factures_tree.heading("quantity", text="?? Quantit� (T)")
+            
+            factures_tree.column("numero", width=150, anchor="center")
+            factures_tree.column("date", width=120, anchor="center")
+            factures_tree.column("quantity", width=120, anchor="center")
+            
+            for facture in summary['factures']:
+                # Ensure facture date is displayed as DD/MM/YYYY
+                raw_date = facture.get('date')
+                display_date = self._format_date_display(raw_date)
+                factures_tree.insert("", tk.END, values=(
+                    facture['numero'], display_date, f"{facture['quantity']:.3f}"
+                ))
+            
+            # Scrollbar
+            scrollbar = ttk.Scrollbar(factures_frame, orient=tk.VERTICAL, command=factures_tree.yview)
+            factures_tree.configure(yscrollcommand=scrollbar.set)
+            
+            factures_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Close button
+        ttk.Button(details_window, text="?? Fermer", 
+                  command=details_window.destroy).pack(pady=20)
+
+    def _format_date_display(self, value):
+        """Format various date representations to DD/MM/YYYY for display.
+        Accepts date/datetime objects or strings like YYYY-MM-DD and returns a string.
+        """
+        try:
+            from datetime import date as _date, datetime as _dt
+            if value is None:
+                return ""
+            # Already a date/datetime object
+            if isinstance(value, (_dt, _date)):
+                # Convert date to datetime for strftime compatibility uniformly
+                if isinstance(value, _date) and not isinstance(value, _dt):
+                    return _dt(value.year, value.month, value.day).strftime("%d/%m/%Y")
+                return value.strftime("%d/%m/%Y")
+            # String formats
+            s = str(value).strip()
+            if not s:
+                return ""
+            # Try common ISO formats
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y", "%d/%m/%y"):
+                try:
+                    d = _dt.strptime(s, fmt)
+                    return d.strftime("%d/%m/%Y")
+                except ValueError:
+                    continue
+            # Try to handle ISO with time (e.g., 2025-08-17T13:45:00)
+            try:
+                d = _dt.fromisoformat(s.replace("Z", "+00:00"))
+                return d.strftime("%d/%m/%Y")
+            except Exception:
+                pass
+            # Fallback: return original
+            return s
+        except Exception:
+            return str(value) if value is not None else ""
+
+
+class BonLivraisonDialog(tk.Toplevel):
+    """Dialog for creating Bon de Livraison."""
+    
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.parent = parent
+        self.result = None
+        
+        self.title(title)
+        self.geometry("520x600")  # Increased height for avoir section
+        self.resizable(False, False)
+        
+        # Center window
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        self.center_window()
+    
+    def setup_ui(self):
+        """Setup the dialog UI."""
+        # Main frame
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Numéro
+        ttk.Label(main_frame, text="Numéro:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.numero_var = tk.StringVar()
+        self.numero_entry = ttk.Entry(main_frame, textvariable=self.numero_var, width=30)
+        self.numero_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Date de livraison
+        ttk.Label(main_frame, text="Date de livraison:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.date_entry = DateEntry(main_frame, width=20, date_pattern='dd/mm/yyyy')
+        self.date_entry.grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Fournisseur
+        ttk.Label(main_frame, text="Fournisseur:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.fournisseur_var = tk.StringVar()
+        self.fournisseur_combo = ttk.Combobox(main_frame, textvariable=self.fournisseur_var, width=30)
+        self.fournisseur_combo.grid(row=2, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.load_fournisseurs()
+        
+        # Quantité
+        ttk.Label(main_frame, text="Quantité:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.quantite_var = tk.StringVar()
+        self.quantite_entry = ttk.Entry(main_frame, textvariable=self.quantite_var, width=20)
+        self.quantite_entry.grid(row=3, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Unité
+        ttk.Label(main_frame, text="Unité:").grid(row=3, column=2, sticky=tk.W, pady=5, padx=(20, 0))
+        self.unite_var = tk.StringVar(value="tonnes")
+        unite_combo = ttk.Combobox(main_frame, textvariable=self.unite_var,
+                                  values=["tonnes", "kg", "m³"], width=10)
+        unite_combo.grid(row=3, column=3, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Montant
+        ttk.Label(main_frame, text="Montant (DT):").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.montant_var = tk.StringVar()
+        self.montant_entry = ttk.Entry(main_frame, textvariable=self.montant_var, width=20)
+        self.montant_entry.grid(row=4, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Description
+        ttk.Label(main_frame, text="Description:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        self.description_text = tk.Text(main_frame, height=4, width=40)
+        self.description_text.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Avoir section
+        avoir_frame = ttk.LabelFrame(main_frame, text="Types d'Avoir", padding=10)
+        avoir_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=15, padx=5)
+        
+        # Avoir checkboxes
+        self.avoir_vars = {}
+        from stfoom.logic.avoir_manager import avoir_manager
+        
+        # Get avoir config and default selection
+        avoir_config = avoir_manager.get_avoir_config()
+        default_selection = avoir_manager.get_default_avoir_selection()
+        
+        row_idx = 0
+        for avoir_type, config in avoir_config.items():
+            if config['is_active']:
+                # Create checkbox
+                var = tk.BooleanVar()
+                # Set default values (payment_before_20_days and total_factures_200t_month checked by default)
+                var.set(avoir_type in default_selection)
+                
+                description = config['description']
+                rate = config['rate']
+                display_text = f"{description} ({rate:.3f} DT/tonne)" if rate > 0 else description
+                
+                checkbox = ttk.Checkbutton(avoir_frame, text=display_text, variable=var)
+                checkbox.grid(row=row_idx, column=0, sticky="w", pady=2)
+                
+                self.avoir_vars[avoir_type] = var
+                row_idx += 1
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=7, column=0, columnspan=4, pady=20)
+        
+        ttk.Button(button_frame, text="Enregistrer", command=self.save).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Annuler", command=self.cancel).pack(side=tk.LEFT)
+    
+    def center_window(self):
+        """Center the dialog window."""
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - (self.winfo_width() // 2)
+        y = (self.winfo_screenheight() // 2) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+    
+    def load_fournisseurs(self):
+        """Load fournisseurs for combobox."""
+        fournisseurs = exec_read_all("SELECT code_fournisseur, nom_fournisseur FROM fournisseurs ORDER BY nom_fournisseur")
+        fournisseur_list = [f"{f[1]} ({f[0]})" for f in fournisseurs]
+        
+        self.fournisseur_combo['values'] = fournisseur_list
+        if fournisseur_list:
+            self.fournisseur_combo.set(fournisseur_list[0])
+    
+    def get_selected_fournisseur_id(self):
+        """Get the selected fournisseur ID from combobox."""
+        selected = self.fournisseur_var.get()
+        if selected:
+            # Extract code from "Name (Code)" format
+            try:
+                return selected.split("(")[1].rstrip(")")
+            except:
+                return None
+        return None
+    
+    def save(self):
+        """Save the BL."""
+        try:
+            # Validate inputs
+            numero = self.numero_var.get().strip()
+            if not numero:
+                messagebox.showerror("Erreur", "Le numéro est requis")
+                return
+            
+            date_livraison = self.date_entry.get_date()
+            if not date_livraison:
+                messagebox.showerror("Erreur", "La date de livraison est requise")
+                return
+            
+            fournisseur_id = self.get_selected_fournisseur_id()
+            if not fournisseur_id:
+                messagebox.showerror("Erreur", "Le fournisseur est requis")
+                return
+            
+            try:
+                quantite = float(self.quantite_var.get())
+            except ValueError:
+                messagebox.showerror("Erreur", "La quantité doit être un nombre")
+                return
+            
+            try:
+                montant = float(self.montant_var.get())
+            except ValueError:
+                messagebox.showerror("Erreur", "Le montant doit être un nombre")
+                return
+            
+            unite = self.unite_var.get()
+            description = self.description_text.get(1.0, tk.END).strip()
+            
+            # Create BL
+            success, message, bl_id = create_bon_livraison(
+                numero=numero,
+                date_livraison=date_livraison,
+                fournisseur_id=fournisseur_id,
+                quantite=quantite,
+                montant=montant,
+                unite=unite,
+                description=description if description else None,
+                created_by=self.parent.current_user_id
+            )
+            
+            if success:
+                # Save avoir selections for this BL
+                selected_avoir_types = []
+                for avoir_type, var in self.avoir_vars.items():
+                    if var.get():
+                        selected_avoir_types.append(avoir_type)
+                
+                # Apply avoir selections
+                if selected_avoir_types and bl_id:
+                    from stfoom.logic.avoir_manager import avoir_manager
+                    avoir_manager.set_bl_avoir_applications(bl_id, selected_avoir_types)
+                    print(f"[BL] Applied avoir types {selected_avoir_types} to BL {bl_id}")
+                
+                messagebox.showinfo("Succ�s", message)
+                self.result = bl_id
+                
+                # Auto-refresh parent data (rebuild supplier filter) and select this fournisseur
+                if hasattr(self.parent, 'load_bl_data'):
+                    try:
+                        # Rebuild supplier filter so new supplier appears if it was absent
+                        self.parent.load_bl_data(refresh_suppliers=True)
+                        # Set supplier selection to the BL's supplier
+                        try:
+                            from app.stfoom.logic.secure_database import exec_read_one
+                            row = exec_read_one("SELECT nom_fournisseur FROM fournisseurs WHERE code_fournisseur=?", (fournisseur_id,))
+                            nom = row[0] if row else ''
+                            display = f"{nom} ({fournisseur_id})" if nom else f"ID: {fournisseur_id}"
+                            self.parent.bl_supplier_combo.set(display)
+                            # Reload with this selection applied
+                            self.parent.load_bl_data(refresh_suppliers=False)
+                        except Exception:
+                            # If anything fails, at least list all BLs without filter
+                            pass
+                    except Exception:
+                        # Fallback reload without refreshing suppliers
+                        self.parent.load_bl_data()
+                if hasattr(self.parent, 'refresh_monthly_status'):
+                    self.parent.refresh_monthly_status()
+                if hasattr(self.parent, 'load_monthly_history'):
+                    self.parent.load_monthly_history()
+                
+                self.destroy()
+            else:
+                messagebox.showerror("Erreur", message)
+                
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Erreur lors de la sauvegarde: {e}")
+    
+    def cancel(self):
+        """Cancel the dialog."""
+        self.destroy()
+
+
+class CimentFactureDialog(tk.Toplevel):
+    """Dialog for creating/editing Ciment Factures (similar to AchatDialog)."""
+    
+    def __init__(self, parent, title, facture_id=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.result = None
+        self.facture_id = facture_id
+        self.selected_fournisseur = None
+        self.selected_bls = []
+        
+        self.title(title)
+        self.geometry("700x750")
+        self.resizable(True, True)
+        
+        # Center window
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        self.center_window()
+        
+        # Load initial BLs after UI is set up
+        self.load_initial_bls()
+        
+        if facture_id:
+            self.load_facture_data(facture_id)
+    
+    def setup_ui(self):
+        """Setup the dialog UI."""
+        # Main container
+        main_container = ttk.Frame(self)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Scrollable content frame
+        canvas = tk.Canvas(main_container, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        main_frame = ttk.Frame(canvas)
+        
+        main_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Fournisseur
+        fournisseur_frame = ttk.LabelFrame(main_frame, text="Fournisseur")
+        fournisseur_frame.pack(fill=tk.X, pady=(0, 10), ipadx=10, ipady=10)
+        
+        def on_fournisseur_select(fournisseur_data):
+            self.selected_fournisseur = fournisseur_data
+            self.fournisseur_var.set(fournisseur_data.get('nom_fournisseur', ''))
+            # Update BL list when fournisseur changes
+            self.load_available_bls()
+        
+        self.fournisseur_combo = self.create_fournisseur_selector(fournisseur_frame, on_fournisseur_select)
+        self.fournisseur_var = tk.StringVar()
+        # Set initial fournisseur if available
+        if hasattr(self, 'selected_fournisseur') and self.selected_fournisseur:
+            self.fournisseur_var.set(self.selected_fournisseur.get('nom_fournisseur', ''))
+        
+        # Facture details
+        details_frame = ttk.LabelFrame(main_frame, text="Détails de la Facture")
+        details_frame.pack(fill=tk.X, pady=(0, 10), ipadx=10, ipady=10)
+        
+        # Numéro Facture
+        ttk.Label(details_frame, text="Numéro Facture:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.numero_facture_var = tk.StringVar()
+        ttk.Entry(details_frame, textvariable=self.numero_facture_var, width=20).grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Date Facture
+        ttk.Label(details_frame, text="Date Facture:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.date_entry = DateEntry(details_frame, width=20, date_pattern='dd/mm/yyyy')
+        self.date_entry.grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Montant HT
+        ttk.Label(details_frame, text="Montant HT:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.montant_ht_var = tk.StringVar()
+        ttk.Entry(details_frame, textvariable=self.montant_ht_var, width=15).grid(row=2, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Timbre
+        ttk.Label(details_frame, text="Timbre:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.timbre_var = tk.StringVar(value="0")
+        ttk.Entry(details_frame, textvariable=self.timbre_var, width=15).grid(row=3, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Taxes
+        ttk.Label(details_frame, text="Taxes:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        tax_frame = ttk.Frame(details_frame)
+        tax_frame.grid(row=4, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Tax management button
+        ttk.Button(tax_frame, text="Gérer les taxes", 
+                  command=lambda: self.manage_taxes()).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Tax display frame
+        self.taxes_frame = ttk.Frame(details_frame)
+        self.taxes_frame.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=5, padx=(10, 0))
+        self.taxes_vars = []  # List of (tax_id_var, value_var, row_frame)
+        self._add_tax_row("TVA 19%", "0", is_default=True)
+        ttk.Button(details_frame, text="+ Ajouter une taxe", 
+                  command=self._add_tax_row).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Montant Total
+        ttk.Label(details_frame, text="Montant Total:").grid(row=7, column=0, sticky=tk.W, pady=5)
+        self.montant_total_var = tk.StringVar()
+        ttk.Entry(details_frame, textvariable=self.montant_total_var, width=15).grid(row=7, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # Date Échéance
+        ttk.Label(details_frame, text="Date Échéance:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        self.date_echeance_entry = DateEntry(details_frame, width=20, date_pattern='dd/mm/yyyy')
+        self.date_echeance_entry.grid(row=8, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        
+        # BLs Selection
+        bls_frame = ttk.LabelFrame(main_frame, text="Bon de Livraison à Inclure")
+        bls_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10), ipadx=10, ipady=10)
+        
+        # BLs Treeview
+        columns = ("numero", "date", "quantite", "montant", "statut")
+        self.bls_tree = ttk.Treeview(bls_frame, columns=columns, show="headings", height=8)
+        
+        # Configure columns
+        self.bls_tree.heading("numero", text="Numéro")
+        self.bls_tree.heading("date", text="Date")
+        self.bls_tree.heading("quantite", text="Quantité")
+        self.bls_tree.heading("montant", text="Montant")
+        self.bls_tree.heading("statut", text="Statut")
+        
+        self.bls_tree.column("numero", width=100)
+        self.bls_tree.column("date", width=100)
+        self.bls_tree.column("quantite", width=80)
+        self.bls_tree.column("montant", width=100)
+        self.bls_tree.column("statut", width=80)
+        
+        # Scrollbar for BLs
+        bls_scrollbar = ttk.Scrollbar(bls_frame, orient=tk.VERTICAL, command=self.bls_tree.yview)
+        self.bls_tree.configure(yscrollcommand=bls_scrollbar.set)
+        
+        # Pack BLs tree and scrollbar
+        self.bls_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bls_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # BLs controls
+        bls_controls = ttk.Frame(bls_frame)
+        bls_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(bls_controls, text="Ajouter BL", command=self.add_bl_to_facture).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(bls_controls, text="Retirer BL", command=self.remove_bl_from_facture).pack(side=tk.LEFT)
+        
+        # Notes
+        notes_frame = ttk.LabelFrame(main_frame, text="Notes")
+        notes_frame.pack(fill=tk.X, pady=(0, 10), ipadx=10, ipady=10)
+        
+        self.notes_text = tk.Text(notes_frame, height=4, width=60)
+        self.notes_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Buttons (outside scrollable area)
+        button_frame = ttk.Frame(main_container)
+        button_frame.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
+        
+        # Make buttons more visible with better styling
+        save_btn = tk.Button(button_frame, text="Enregistrer", command=self.save, 
+                            bg="#28a745", fg="white", font=("Arial", 10, "bold"),
+                            relief="flat", padx=20, pady=5)
+        save_btn.pack(side=tk.RIGHT, padx=(0, 10))
+        
+        cancel_btn = tk.Button(button_frame, text="Annuler", command=self.cancel,
+                              bg="#6c757d", fg="white", font=("Arial", 10),
+                              relief="flat", padx=20, pady=5)
+        cancel_btn.pack(side=tk.RIGHT)
+    
+    def center_window(self):
+        """Center the dialog window."""
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - (self.winfo_width() // 2)
+        y = (self.winfo_screenheight() // 2) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+    
+    def create_fournisseur_selector(self, parent, on_select):
+        """Create fournisseur selector similar to achat module."""
+        # Simple combobox for now
+        fournisseurs = exec_read_all("SELECT code_fournisseur, nom_fournisseur FROM fournisseurs ORDER BY nom_fournisseur")
+        fournisseur_list = [f"{f[1]} ({f[0]})" for f in fournisseurs]
+        
+        combo = ttk.Combobox(parent, values=fournisseur_list, width=40)
+        combo.pack(anchor=tk.W, padx=10, pady=5)
+        
+        # Bind selection event
+        def on_combo_select(event):
+            selected = combo.get()
+            if selected:
+                # Extract fournisseur data from "Name (Code)" format
+                try:
+                    name = selected.split("(")[0].strip()
+                    code = selected.split("(")[1].rstrip(")")
+                    fournisseur_data = {
+                        'nom_fournisseur': name,
+                        'code_fournisseur': code
+                    }
+                    on_select(fournisseur_data)
+                except:
+                    pass
+        
+        combo.bind("<<ComboboxSelected>>", on_combo_select)
+        
+        if fournisseur_list:
+            combo.set(fournisseur_list[0])
+            # Don't trigger initial selection here - let the dialog finish initializing first
+        
+        return combo
+    
+    def manage_taxes(self):
+        """Open tax management dialog."""
+        from stfoom.ui.achat_page import TaxesDialog
+        TaxesDialog(self)
+    
+    def _add_tax_row(self, name_val="", value_val="", is_default=False):
+        """Add a tax row to the taxes frame."""
+        row = tk.Frame(self.taxes_frame)
+        if is_default:
+            tk.Label(row, text="TVA 19%", width=18).pack(side=tk.LEFT, padx=2)
+            value_var = tk.StringVar(value=value_val)
+            tk.Entry(row, textvariable=value_var, width=10).pack(side=tk.LEFT, padx=2)
+            del_btn = tk.Label(row, text="(défaut)")
+            del_btn.pack(side=tk.LEFT, padx=2)
+            row.pack(pady=1)
+            self.taxes_vars.append((None, value_var, row))
+        else:
+            from stfoom.logic import taxes as taxes_logic
+            taxes = taxes_logic.get_all_taxes()
+            tax_names = [t['name'] for t in taxes]
+            tax_id_var = tk.StringVar()
+            tax_combo = ttk.Combobox(row, textvariable=tax_id_var, values=tax_names, state="readonly", width=18)
+            tax_combo.pack(side=tk.LEFT, padx=2)
+            value_var = tk.StringVar(value=value_val)
+            tk.Entry(row, textvariable=value_var, width=10).pack(side=tk.LEFT, padx=2)
+            del_btn = tk.Button(row, text="Supprimer", command=lambda: self._remove_tax_row(row, tax_id_var))
+            del_btn.pack(side=tk.LEFT, padx=2)
+            row.pack(pady=1)
+            self.taxes_vars.append((tax_id_var, value_var, row))
+
+    def _remove_tax_row(self, row, tax_id_var):
+        """Remove a tax row."""
+        # Prevent removing TVA 19% default
+        if tax_id_var is None:
+            messagebox.showwarning("Action interdite", "TVA 19% ne peut pas être supprimée.")
+            return
+        for i, (n, _, r) in enumerate(self.taxes_vars):
+            if r == row:
+                r.destroy()
+                self.taxes_vars.pop(i)
+                break
+    
+    def load_initial_bls(self):
+        """Load initial BLs for the first fournisseur."""
+        if hasattr(self, 'selected_fournisseur') and self.selected_fournisseur:
+            self.load_available_bls()
+        else:
+            # Get the first fournisseur and load their BLs
+            fournisseurs = exec_read_all("SELECT code_fournisseur, nom_fournisseur FROM fournisseurs ORDER BY nom_fournisseur")
+            if fournisseurs:
+                first_fournisseur = {
+                    'nom_fournisseur': fournisseurs[0][1],
+                    'code_fournisseur': fournisseurs[0][0]
+                }
+                self.selected_fournisseur = first_fournisseur
+                self.fournisseur_var.set(first_fournisseur['nom_fournisseur'])
+                self.load_available_bls()
+    
+    def load_available_bls(self):
+        """Load available BLs for the selected fournisseur."""
+        # Clear existing items
+        for item in self.bls_tree.get_children():
+            self.bls_tree.delete(item)
+        
+        if not self.selected_fournisseur:
+            return
+        
+        fournisseur_code = self.selected_fournisseur.get('code_fournisseur')
+        if not fournisseur_code:
+            return
+        
+        # Get BLs en attente for this fournisseur
+        bls = get_bls_en_attente(fournisseur_code)
+        
+        # Add to treeview
+        for bl in bls:
+            statut_display = {
+                "en_attente": "En Attente",
+                "facturee": "Facturée",
+                "annulee": "Annulée"
+            }.get(bl.statut, bl.statut)
+            
+            self.bls_tree.insert("", tk.END, values=(
+                bl.numero,
+                bl.date_livraison.strftime("%d/%m/%Y"),
+                f"{bl.quantite} {bl.unite}",
+                format_money(bl.montant),
+                statut_display
+            ), tags=(str(bl.id),))
+    
+    def add_bl_to_facture(self):
+        """Add selected BL to facture."""
+        selection = self.bls_tree.selection()
+        if not selection:
+            messagebox.showwarning("Aucune sélection", "Veuillez sélectionner un BL à ajouter")
+            return
+        
+        bl_id = int(self.bls_tree.item(selection[0], "tags")[0])
+        bl_data = self.bls_tree.item(selection[0], "values")
+        
+        # Check if BL is already selected
+        if any(bl['id'] == bl_id for bl in self.selected_bls):
+            messagebox.showwarning("BL déjà sélectionné", "Ce BL est déjà inclus dans la facture")
+            return
+        
+        # Add to selected BLs
+        self.selected_bls.append({
+            'id': bl_id,
+            'numero': bl_data[0],
+            'montant': float(bl_data[3].replace(' DT', ''))
+        })
+        
+        # Update montant total
+        self.update_montant_total()
+        
+        messagebox.showinfo("Succès", f"BL {bl_data[0]} ajouté à la facture")
+    
+    def remove_bl_from_facture(self):
+        """Remove BL from facture."""
+        if not self.selected_bls:
+            messagebox.showwarning("Aucun BL", "Aucun BL sélectionné pour cette facture")
+            return
+        
+        # Show dialog to select BL to remove
+        bl_list = [f"{bl['numero']} - {bl['montant']:.3f} DT" for bl in self.selected_bls]
+        selected = simpledialog.askstring("Retirer BL", "Entrez le numéro du BL à retirer:")
+        
+        if selected:
+            # Find and remove BL
+            for i, bl in enumerate(self.selected_bls):
+                if bl['numero'] == selected:
+                    removed_bl = self.selected_bls.pop(i)
+                    self.update_montant_total()
+                    messagebox.showinfo("Succès", f"BL {removed_bl['numero']} retiré de la facture")
+                    return
+            
+            messagebox.showwarning("BL introuvable", "BL non trouvé dans la facture")
+    
+    def update_montant_total(self):
+        """Update montant total based on selected BLs."""
+        total_bls = sum(bl['montant'] for bl in self.selected_bls)
+        self.montant_total_var.set(f"{total_bls:.3f}")
+    
+    def load_facture_data(self, facture_id):
+        """Load existing facture data for editing."""
+        from stfoom.logic.ciment import get_ciment_facture
+        
+        facture = get_ciment_facture(facture_id)
+        if not facture:
+            messagebox.showerror("Erreur", "Facture introuvable")
+            self.destroy()
+            return
+        
+        # Load facture data
+        self.numero_facture_var.set(facture.numero_facture)
+        self.date_entry.set_date(facture.date_facture)
+        self.montant_ht_var.set(str(facture.montant_ht))
+        self.timbre_var.set("0")  # Default timbre for existing factures
+        self.montant_total_var.set(str(facture.montant_total))
+        
+        # Load taxes - set TVA 19% value
+        if self.taxes_vars and len(self.taxes_vars) > 0:
+            self.taxes_vars[0][1].set(str(facture.tva))
+        if facture.date_echeance:
+            self.date_echeance_entry.set_date(facture.date_echeance)
+        if facture.notes:
+            self.notes_text.insert("1.0", facture.notes)
+        
+        # Load fournisseur
+        if facture.fournisseur_nom:
+            self.fournisseur_var.set(facture.fournisseur_nom)
+        
+        # Load BLs
+        if facture.bls_inclus:
+            self.selected_bls = [
+                {
+                    'id': bl.id,
+                    'numero': bl.numero,
+                    'montant': bl.montant
+                }
+                for bl in facture.bls_inclus
+            ]
+    
+    def save(self):
+        """Save the facture."""
+        try:
+            # Validate inputs
+            numero_facture = self.numero_facture_var.get().strip()
+            if not numero_facture:
+                messagebox.showerror("Erreur", "Le numéro de facture est requis")
+                return
+            
+            date_facture = self.date_entry.get_date()
+            if not date_facture:
+                messagebox.showerror("Erreur", "La date de facture est requise")
+                return
+            
+            if not self.selected_fournisseur:
+                messagebox.showerror("Erreur", "Le fournisseur est requis")
+                return
+            
+            try:
+                montant_ht = float(self.montant_ht_var.get())
+                timbre = float(self.timbre_var.get())
+                montant_total = float(self.montant_total_var.get())
+                
+                # Calculate taxes from tax rows
+                taxes = [
+                    {'name': 'TVA 19%', 'value': float(self.taxes_vars[0][1].get().replace(",", ".")) if self.taxes_vars[0][1].get().strip() else 0}
+                ] + [
+                    {'name': n.get(), 'value': float(v.get().replace(",", ".")) if v.get().strip() else 0}
+                    for n, v, _ in self.taxes_vars[1:] if n and n.get()
+                ]
+                
+                # Calculate total tax amount
+                total_taxes = sum(tax['value'] for tax in taxes)
+                
+            except ValueError:
+                messagebox.showerror("Erreur", "Les montants doivent être des nombres")
+                return
+            
+            date_echeance = self.date_echeance_entry.get_date()
+            notes = self.notes_text.get(1.0, tk.END).strip()
+            
+            # Get BL IDs
+            bl_ids = [bl['id'] for bl in self.selected_bls]
+            
+            if self.facture_id:
+                # Update existing facture
+                from stfoom.logic.ciment import update_ciment_facture
+                success, message = update_ciment_facture(
+                    facture_id=self.facture_id,
+                    numero_facture=numero_facture,
+                    date_facture=date_facture,
+                    fournisseur_id=self.selected_fournisseur['code_fournisseur'],
+                    montant_total=montant_total,
+                    montant_ht=montant_ht,
+                    tva=total_taxes,
+                    date_echeance=date_echeance,
+                    notes=notes if notes else None
+                )
+            else:
+                # Create new facture
+                success, message, facture_id = create_ciment_facture(
+                    numero_facture=numero_facture,
+                    date_facture=date_facture,
+                    fournisseur_id=self.selected_fournisseur['code_fournisseur'],
+                    montant_total=montant_total,
+                    montant_ht=montant_ht,
+                    tva=total_taxes,  # Use total taxes instead of just TVA
+                    timbre=timbre,  # Pass timbre
+                    taxes=taxes,  # Pass full tax structure
+                    date_echeance=date_echeance,
+                    notes=notes if notes else None,
+                    bl_ids=bl_ids,
+                    created_by=self.parent.current_user_id
+                )
+            
+            if success:
+                # Update monthly avoir tracking for new factures
+                if not self.editing_facture and facture_id:
+                    try:
+                        from stfoom.logic.monthly_avoir_manager import MonthlyAvoirManager
+                        monthly_manager = MonthlyAvoirManager()
+                        monthly_result = monthly_manager.update_monthly_totals(facture_id)
+                        print(f"[FACTURE] Monthly avoir updated: {monthly_result}")
+                    except Exception as e:
+                        print(f"[FACTURE] Error updating monthly avoir: {e}")
+                
+                messagebox.showinfo("Succès", message)
+                self.result = True
+                
+                # Auto-refresh parent data
+                if hasattr(self.parent, 'load_factures_data'):
+                    self.parent.load_factures_data()
+                if hasattr(self.parent, 'load_bl_data'):
+                    self.parent.load_bl_data()
+                if hasattr(self.parent, 'refresh_monthly_status'):
+                    self.parent.refresh_monthly_status()
+                if hasattr(self.parent, 'load_monthly_history'):
+                    self.parent.load_monthly_history()
+                
+                self.destroy()
+            else:
+                messagebox.showerror("Erreur", message)
+                
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Erreur lors de la sauvegarde: {e}")
+    
+    def cancel(self):
+        """Cancel the dialog."""
+        self.destroy() 
+
+class FactureNumeroDialog(tk.Toplevel):
+    """Dialog for setting facture number."""
+    
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.parent = parent
+        self.result = None
+        
+        self.title(title)
+        self.geometry("400x150")
+        self.resizable(False, False)
+        
+        # Center window
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        self.center_window()
+    
+    def setup_ui(self):
+        """Setup the dialog UI."""
+        # Main frame
+        main_frame = ttk.Frame(self, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Facture number
+        ttk.Label(main_frame, text="Numéro de facture:").pack(anchor=tk.W, pady=(0, 5))
+        self.numero_var = tk.StringVar()
+        self.numero_entry = ttk.Entry(main_frame, textvariable=self.numero_var, width=30)
+        self.numero_entry.pack(fill=tk.X, pady=(0, 20))
+        self.numero_entry.focus()
+        
+        # Buttons
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X)
+        
+        ttk.Button(buttons_frame, text="Annuler", command=self.cancel).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(buttons_frame, text="Valider", command=self.validate).pack(side=tk.RIGHT)
+        
+        # Bind Enter key
+        self.bind('<Return>', lambda e: self.validate())
+        self.bind('<Escape>', lambda e: self.cancel())
+    
+    def center_window(self):
+        """Center the window on parent."""
+        self.update_idletasks()
+        x = (self.parent.winfo_rootx() + (self.parent.winfo_width() // 2)) - (self.winfo_width() // 2)
+        y = (self.parent.winfo_rooty() + (self.parent.winfo_height() // 2)) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+    
+    def validate(self):
+        """Validate and save."""
+        numero = self.numero_var.get().strip()
+        if not numero:
+            messagebox.showerror("Erreur", "Veuillez saisir un numéro de facture")
+            return
+        
+        self.result = {'numero_facture': numero}
+        self.destroy()
+    
+    def cancel(self):
+        """Cancel the dialog."""
+        self.destroy()
+
+
+class AvoirAmountDialog(tk.Toplevel):
+    """Dialog for setting avoir amount."""
+    
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.parent = parent
+        self.result = None
+        
+        self.title(title)
+        self.geometry("400x150")
+        self.resizable(False, False)
+        
+        # Center window
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        self.center_window()
+    
+    def setup_ui(self):
+        """Setup the dialog UI."""
+        # Main frame
+        main_frame = ttk.Frame(self, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Avoir amount
+        ttk.Label(main_frame, text="Montant avoir (DT):").pack(anchor=tk.W, pady=(0, 5))
+        self.amount_var = tk.StringVar()
+        self.amount_entry = ttk.Entry(main_frame, textvariable=self.amount_var, width=30)
+        self.amount_entry.pack(fill=tk.X, pady=(0, 20))
+        self.amount_entry.focus()
+        
+        # Buttons
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X)
+        
+        ttk.Button(buttons_frame, text="Annuler", command=self.cancel).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(buttons_frame, text="Valider", command=self.validate).pack(side=tk.RIGHT)
+        
+        # Bind Enter key
+        self.bind('<Return>', lambda e: self.validate())
+        self.bind('<Escape>', lambda e: self.cancel())
+    
+    def center_window(self):
+        """Center the window on parent."""
+        self.update_idletasks()
+        x = (self.parent.winfo_rootx() + (self.parent.winfo_width() // 2)) - (self.winfo_width() // 2)
+        y = (self.parent.winfo_rooty() + (self.parent.winfo_height() // 2)) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+    
+    def validate(self):
+        """Validate and save."""
+        try:
+            amount_str = self.amount_var.get().strip().replace(",", ".")
+            if not amount_str:
+                messagebox.showerror("Erreur", "Veuillez saisir un montant")
+                return
+            
+            amount = float(amount_str)
+            if amount < 0:
+                messagebox.showerror("Erreur", "Le montant doit être positif")
+                return
+            
+            self.result = {'avoir_amount': amount}
+            self.destroy()
+            
+        except ValueError:
+            messagebox.showerror("Erreur", "Montant invalide")
+    
+    def cancel(self):
+        """Cancel the dialog."""
+        self.destroy()

@@ -1,0 +1,6 @@
+STFOOM Runtime Info
+timestamp=2025-12-06T15:50:43.953177
+frozen=False
+root_path=C:\Users\saoud\Desktop\New folder\STFOOM
+data_path=C:\Users\saoud\Desktop\New folder\STFOOM\data
+db_path=C:\Users\saoud\Desktop\New folder\STFOOM\data\stfoom.db
